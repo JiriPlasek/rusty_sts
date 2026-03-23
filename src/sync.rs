@@ -1,5 +1,4 @@
-use reqwest::blocking::multipart;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -19,8 +18,19 @@ pub struct SyncResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct SyncRequestFile {
+    filename: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncRequest {
+    files: Vec<SyncRequestFile>,
+}
+
 #[derive(Debug, Deserialize)]
-struct UploadResponse {
+struct SyncResponse {
     #[serde(default)]
     imported: usize,
     #[serde(default)]
@@ -29,8 +39,6 @@ struct UploadResponse {
     errors: Vec<String>,
 }
 
-/// Run the sync process, sending progress updates through the channel.
-/// This function is meant to be called from a spawned thread.
 pub fn run_sync(
     api_url: String,
     api_token: String,
@@ -62,7 +70,7 @@ pub fn run_sync(
         return SyncResult::default();
     }
 
-    let upload_url = format!("{}/api/runs/upload", api_url.trim_end_matches('/'));
+    let sync_url = format!("{}/api/runs/sync", api_url.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let mut result = SyncResult::default();
     let batches: Vec<&[PathBuf]> = run_files.chunks(BATCH_SIZE).collect();
@@ -75,23 +83,17 @@ pub fn run_sync(
             phase: format!("Uploading batch {}/{}", batch_idx + 1, batches.len()),
         });
 
-        let mut form = multipart::Form::new();
-        let mut file_count = 0;
+        let mut request_files = Vec::new();
 
         for file_path in *batch {
-            match std::fs::read(file_path) {
-                Ok(bytes) => {
+            match std::fs::read_to_string(file_path) {
+                Ok(content) => {
                     let filename = file_path
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    let part = multipart::Part::bytes(bytes)
-                        .file_name(filename)
-                        .mime_str("application/octet-stream")
-                        .unwrap();
-                    form = form.part("files", part);
-                    file_count += 1;
+                    request_files.push(SyncRequestFile { filename, content });
                 }
                 Err(e) => {
                     result
@@ -101,21 +103,23 @@ pub fn run_sync(
             }
         }
 
-        if file_count == 0 {
+        if request_files.is_empty() {
             files_processed += batch.len();
             continue;
         }
 
+        let body = SyncRequest { files: request_files };
+
         match client
-            .post(&upload_url)
+            .post(&sync_url)
             .header("Authorization", format!("Bearer {}", api_token))
-            .multipart(form)
+            .json(&body)
             .send()
         {
             Ok(response) => {
                 let status = response.status();
                 if status.is_success() {
-                    match response.json::<UploadResponse>() {
+                    match response.json::<SyncResponse>() {
                         Ok(resp) => {
                             result.imported += resp.imported;
                             result.skipped += resp.skipped;
