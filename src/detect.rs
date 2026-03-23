@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// Scan known locations for STS2 save history folders.
@@ -54,6 +55,26 @@ pub fn detect_save_folders() -> Vec<PathBuf> {
     }
 
     results
+}
+
+/// Count .run files not yet synced.
+pub fn count_new_run_files(folder: &str, synced: &HashSet<String>) -> usize {
+    let path = PathBuf::from(folder);
+    if !path.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(&path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    let p = e.path();
+                    p.extension().is_some_and(|ext| ext == "run")
+                        && !synced.contains(&p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// Count .run files in a directory.

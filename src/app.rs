@@ -19,6 +19,7 @@ pub struct StsApp {
     setup_error: Option<String>,
     // Ready state
     run_file_count: usize,
+    new_run_count: usize,
     last_result: Option<SyncResult>,
     // Syncing state
     progress_rx: Option<mpsc::Receiver<SyncProgress>>,
@@ -43,6 +44,8 @@ impl StsApp {
         match Config::load() {
             Some(config) => {
                 let count = detect::count_run_files(&config.folder_path);
+                let synced = Config::load_synced_runs();
+                let new_count = detect::count_new_run_files(&config.folder_path, &synced);
                 Self {
                     state: AppState::Ready,
                     api_token: config.api_token,
@@ -50,6 +53,7 @@ impl StsApp {
                     detected_folders,
                     setup_error: None,
                     run_file_count: count,
+                    new_run_count: new_count,
                     last_result: None,
                     progress_rx: None,
                     result_rx: None,
@@ -63,6 +67,7 @@ impl StsApp {
                 detected_folders,
                 setup_error: None,
                 run_file_count: 0,
+                new_run_count: 0,
                 last_result: None,
                 progress_rx: None,
                 result_rx: None,
@@ -165,14 +170,20 @@ impl StsApp {
 
         ui.label(format!("Folder: {}", self.folder_path));
         self.run_file_count = detect::count_run_files(&self.folder_path);
-        ui.label(format!("{} .run files found", self.run_file_count));
+        let synced = Config::load_synced_runs();
+        self.new_run_count = detect::count_new_run_files(&self.folder_path, &synced);
+        ui.label(format!("{} .run files found ({} new)", self.run_file_count, self.new_run_count));
 
         ui.add_space(12.0);
 
         ui.horizontal(|ui| {
-            let sync_enabled = self.run_file_count > 0;
+            let sync_enabled = self.new_run_count > 0;
             if ui
-                .add_enabled(sync_enabled, egui::Button::new("Sync"))
+                .add_enabled(sync_enabled, egui::Button::new(if self.new_run_count > 0 {
+                    format!("Sync {} new runs", self.new_run_count)
+                } else {
+                    "All synced".to_string()
+                }))
                 .clicked()
             {
                 self.start_sync();

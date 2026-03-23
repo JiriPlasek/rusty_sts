@@ -1,3 +1,4 @@
+use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -46,7 +47,7 @@ pub fn run_sync(
     progress_tx: mpsc::Sender<SyncProgress>,
 ) -> SyncResult {
     let dir = PathBuf::from(&folder_path);
-    let run_files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+    let all_run_files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
         Ok(entries) => entries
             .flatten()
             .map(|e| e.path())
@@ -60,12 +61,22 @@ pub fn run_sync(
         }
     };
 
+    // Filter out already-synced runs
+    let mut synced = Config::load_synced_runs();
+    let run_files: Vec<PathBuf> = all_run_files
+        .into_iter()
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            !synced.contains(&name)
+        })
+        .collect();
+
     let total = run_files.len();
     if total == 0 {
         let _ = progress_tx.send(SyncProgress {
             current: 0,
             total: 0,
-            phase: "No .run files found".to_string(),
+            phase: "All runs already synced".to_string(),
         });
         return SyncResult::default();
     }
@@ -73,6 +84,7 @@ pub fn run_sync(
     let sync_url = format!("{}/api/runs/sync", api_url.trim_end_matches('/'));
     let client = reqwest::blocking::Client::new();
     let mut result = SyncResult::default();
+    let mut newly_synced: Vec<String> = Vec::new();
     let batches: Vec<&[PathBuf]> = run_files.chunks(BATCH_SIZE).collect();
     let mut files_processed = 0;
 
@@ -119,11 +131,17 @@ pub fn run_sync(
             Ok(response) => {
                 let status = response.status();
                 if status.is_success() {
+                    // Track filenames from this batch as synced
+                    let batch_filenames: Vec<String> = batch
+                        .iter()
+                        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                        .collect();
                     match response.json::<SyncResponse>() {
                         Ok(resp) => {
                             result.imported += resp.imported;
                             result.skipped += resp.skipped;
                             result.errors.extend(resp.errors);
+                            newly_synced.extend(batch_filenames);
                         }
                         Err(e) => {
                             result
@@ -154,6 +172,14 @@ pub fn run_sync(
         }
 
         files_processed += batch.len();
+    }
+
+    // Save newly synced filenames
+    if !newly_synced.is_empty() {
+        for name in &newly_synced {
+            synced.insert(name.clone());
+        }
+        let _ = Config::save_synced_runs(&synced);
     }
 
     let _ = progress_tx.send(SyncProgress {

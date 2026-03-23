@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,8 +12,16 @@ pub struct Config {
 }
 
 impl Config {
+    fn config_dir() -> Option<PathBuf> {
+        dirs::config_dir().map(|p| p.join("rusty-sts"))
+    }
+
     fn config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("rusty-sts").join("config.json"))
+        Self::config_dir().map(|p| p.join("config.json"))
+    }
+
+    fn synced_path() -> Option<PathBuf> {
+        Self::config_dir().map(|p| p.join("synced_runs.json"))
     }
 
     pub fn load() -> Option<Config> {
@@ -47,6 +56,29 @@ impl Config {
         if !path.is_dir() {
             return Err(format!("Path is not a directory: {}", self.folder_path));
         }
+        Ok(())
+    }
+
+    pub fn load_synced_runs() -> HashSet<String> {
+        let path = match Self::synced_path() {
+            Some(p) => p,
+            None => return HashSet::new(),
+        };
+        let contents = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return HashSet::new(),
+        };
+        serde_json::from_str(&contents).unwrap_or_default()
+    }
+
+    pub fn save_synced_runs(synced: &HashSet<String>) -> Result<(), String> {
+        let path = Self::synced_path().ok_or("Could not determine config directory")?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config directory: {e}"))?;
+        }
+        let json = serde_json::to_string(synced).map_err(|e| format!("Failed to serialize: {e}"))?;
+        fs::write(&path, json).map_err(|e| format!("Failed to write synced runs: {e}"))?;
         Ok(())
     }
 }
