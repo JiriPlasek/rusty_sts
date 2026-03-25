@@ -5,10 +5,18 @@ use std::path::PathBuf;
 
 pub const API_URL: &str = env!("STS_API_URL");
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub api_token: String,
     pub folder_path: String,
+    #[serde(default = "default_true")]
+    pub auto_sync: bool,
+    #[serde(default)]
+    pub start_with_windows: bool,
 }
 
 impl Config {

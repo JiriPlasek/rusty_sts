@@ -3,3 +3,4 @@
 *.pdb
 notes
 .cargo/config.toml
+CLAUDE.md

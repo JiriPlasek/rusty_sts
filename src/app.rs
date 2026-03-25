@@ -1,7 +1,13 @@
+use crate::autosync;
 use crate::config::{Config, API_URL};
 use crate::detect;
+use crate::notification;
+use crate::startup;
 use crate::sync::{self, SyncProgress, SyncResult};
-use std::sync::mpsc;
+use crate::tray::{TrayHandle, TrayMenuIds};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use tray_icon::menu::MenuId;
 
 #[derive(Debug, Clone, PartialEq)]
 enum AppState {
@@ -17,6 +23,9 @@ pub struct StsApp {
     folder_path: String,
     detected_folders: Vec<String>,
     setup_error: Option<String>,
+    // Config fields
+    auto_sync: bool,
+    start_with_windows: bool,
     // Ready state
     run_file_count: usize,
     new_run_count: usize,
@@ -25,10 +34,29 @@ pub struct StsApp {
     progress_rx: Option<mpsc::Receiver<SyncProgress>>,
     result_rx: Option<mpsc::Receiver<SyncResult>>,
     current_progress: Option<SyncProgress>,
+    // Tray — _tray_icon must stay alive for the icon to remain visible
+    _tray_icon: tray_icon::TrayIcon,
+    tray_menu_ids: TrayMenuIds,
+    tray_menu_rx: mpsc::Receiver<MenuId>,
+    window_visible: bool,
+    // Auto-sync
+    sync_in_progress: Arc<AtomicBool>,
+    auto_sync_enabled: Arc<AtomicBool>,
+    autosync_started: bool,
+    minimized_on_start: bool,
+    egui_ctx: egui::Context,
 }
 
 impl StsApp {
-    pub fn new() -> Self {
+    pub fn new(
+        tray_handle: TrayHandle,
+        start_visible: bool,
+        egui_ctx: egui::Context,
+    ) -> Self {
+        let _tray_icon = tray_handle._icon;
+        let tray_menu_ids = tray_handle.ids;
+        let tray_menu_rx = tray_handle.menu_rx;
+        let _tray_click_rx = tray_handle.click_rx;
         let detected = detect::detect_save_folders();
         let detected_folders: Vec<String> = detected
             .iter()
@@ -41,51 +69,99 @@ impl StsApp {
             String::new()
         };
 
+        let sync_in_progress = Arc::new(AtomicBool::new(false));
+
         match Config::load() {
             Some(config) => {
                 let count = detect::count_run_files(&config.folder_path);
                 let synced = Config::load_synced_runs();
                 let new_count = detect::count_new_run_files(&config.folder_path, &synced);
+                let auto_sync_enabled = Arc::new(AtomicBool::new(config.auto_sync));
+
+                // Start autosync immediately — don't wait for update() which may not
+                // run reliably when the window is hidden via SW_HIDE.
+                autosync::start_polling(
+                    config.folder_path.clone(),
+                    config.api_token.clone(),
+                    Arc::clone(&sync_in_progress),
+                    Arc::clone(&auto_sync_enabled),
+                );
+
                 Self {
                     state: AppState::Ready,
                     api_token: config.api_token,
                     folder_path: config.folder_path,
                     detected_folders,
                     setup_error: None,
+                    auto_sync: config.auto_sync,
+                    start_with_windows: config.start_with_windows,
                     run_file_count: count,
                     new_run_count: new_count,
                     last_result: None,
                     progress_rx: None,
                     result_rx: None,
                     current_progress: None,
+                    _tray_icon,
+                    tray_menu_ids,
+                    tray_menu_rx,
+                    window_visible: start_visible,
+                    sync_in_progress,
+                    auto_sync_enabled,
+                    autosync_started: true,
+                    minimized_on_start: false,
+                    egui_ctx,
                 }
             }
-            None => Self {
-                state: AppState::Setup,
-                api_token: String::new(),
-                folder_path: auto_folder,
-                detected_folders,
-                setup_error: None,
-                run_file_count: 0,
-                new_run_count: 0,
-                last_result: None,
-                progress_rx: None,
-                result_rx: None,
-                current_progress: None,
-            },
+            None => {
+                let auto_sync_enabled = Arc::new(AtomicBool::new(true));
+                Self {
+                    state: AppState::Setup,
+                    api_token: String::new(),
+                    folder_path: auto_folder,
+                    detected_folders,
+                    setup_error: None,
+                    auto_sync: true,
+                    start_with_windows: false,
+                    run_file_count: 0,
+                    new_run_count: 0,
+                    last_result: None,
+                    progress_rx: None,
+                    result_rx: None,
+                    current_progress: None,
+                    _tray_icon,
+                    tray_menu_ids,
+                    tray_menu_rx,
+                    window_visible: start_visible,
+                    sync_in_progress,
+                    auto_sync_enabled,
+                    autosync_started: false,
+                    minimized_on_start: false,
+                    egui_ctx,
+                }
+            }
         }
+    }
+
+    fn refresh_file_counts(&mut self) {
+        self.run_file_count = detect::count_run_files(&self.folder_path);
+        let synced = Config::load_synced_runs();
+        self.new_run_count = detect::count_new_run_files(&self.folder_path, &synced);
     }
 
     fn save_config(&self) -> Result<(), String> {
         let config = Config {
             api_token: self.api_token.clone(),
             folder_path: self.folder_path.clone(),
+            auto_sync: self.auto_sync,
+            start_with_windows: self.start_with_windows,
         };
         config.validate()?;
         config.save()
     }
 
     fn start_sync(&mut self) {
+        self.sync_in_progress.store(true, Ordering::Relaxed);
+
         let (progress_tx, progress_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
 
@@ -93,15 +169,56 @@ impl StsApp {
         let api_token = self.api_token.clone();
         let folder_path = self.folder_path.clone();
 
+        let sync_flag = Arc::clone(&self.sync_in_progress);
         std::thread::spawn(move || {
             let result = sync::run_sync(api_url, api_token, folder_path, progress_tx);
             let _ = result_tx.send(result);
+            // Clear flag here too — if the window is hidden, render_syncing won't run
+            sync_flag.store(false, Ordering::Relaxed);
         });
 
         self.progress_rx = Some(progress_rx);
         self.result_rx = Some(result_rx);
         self.current_progress = None;
         self.state = AppState::Syncing;
+    }
+
+    fn start_autosync_polling(&mut self) {
+        if self.autosync_started {
+            return;
+        }
+
+        autosync::start_polling(
+            self.folder_path.clone(),
+            self.api_token.clone(),
+            Arc::clone(&self.sync_in_progress),
+            Arc::clone(&self.auto_sync_enabled),
+        );
+
+        self.autosync_started = true;
+    }
+
+    fn handle_tray_events(&mut self) {
+        // Open and Quit are handled directly in tray.rs callbacks via Win32 API.
+        // Only Sync Now comes through the channel.
+        while let Ok(id) = self.tray_menu_rx.try_recv() {
+            if id == self.tray_menu_ids.sync_now {
+                self.refresh_file_counts();
+                if self.state == AppState::Ready && self.new_run_count > 0 {
+                    self.start_sync();
+                }
+            }
+        }
+    }
+
+    fn handle_close_requested(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // Hide to tray instead of exiting — use Win32 API to fully
+            // remove from taskbar (Visible(false) kills eframe's event loop).
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            crate::tray::hide_window_win32();
+            self.window_visible = false;
+        }
     }
 
     fn render_setup(&mut self, ui: &mut egui::Ui) {
@@ -115,7 +232,8 @@ impl StsApp {
         ui.label("Save Folder:");
         ui.horizontal(|ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut self.folder_path).desired_width(ui.available_width() - 70.0),
+                egui::TextEdit::singleline(&mut self.folder_path)
+                    .desired_width(ui.available_width() - 70.0),
             );
             if ui.button("Browse").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -154,7 +272,7 @@ impl StsApp {
             match self.save_config() {
                 Ok(()) => {
                     self.setup_error = None;
-                    self.run_file_count = detect::count_run_files(&self.folder_path);
+                    self.refresh_file_counts();
                     self.state = AppState::Ready;
                 }
                 Err(e) => {
@@ -169,21 +287,24 @@ impl StsApp {
         ui.add_space(8.0);
 
         ui.label(format!("Folder: {}", self.folder_path));
-        self.run_file_count = detect::count_run_files(&self.folder_path);
-        let synced = Config::load_synced_runs();
-        self.new_run_count = detect::count_new_run_files(&self.folder_path, &synced);
-        ui.label(format!("{} .run files found ({} new)", self.run_file_count, self.new_run_count));
+        ui.label(format!(
+            "{} .run files found ({} new)",
+            self.run_file_count, self.new_run_count
+        ));
 
         ui.add_space(12.0);
 
         ui.horizontal(|ui| {
             let sync_enabled = self.new_run_count > 0;
             if ui
-                .add_enabled(sync_enabled, egui::Button::new(if self.new_run_count > 0 {
-                    format!("Sync {} new runs", self.new_run_count)
-                } else {
-                    "All synced".to_string()
-                }))
+                .add_enabled(
+                    sync_enabled,
+                    egui::Button::new(if self.new_run_count > 0 {
+                        format!("Sync {} new runs", self.new_run_count)
+                    } else {
+                        "All synced".to_string()
+                    }),
+                )
                 .clicked()
             {
                 self.start_sync();
@@ -193,14 +314,39 @@ impl StsApp {
             }
         });
 
+        // Settings toggles
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        let prev_auto_sync = self.auto_sync;
+        ui.checkbox(&mut self.auto_sync, "Auto-sync new runs");
+        if self.auto_sync != prev_auto_sync {
+            let _ = self.save_config();
+            // Update the shared flag so the polling thread respects the toggle
+            self.auto_sync_enabled
+                .store(self.auto_sync, Ordering::Relaxed);
+            if self.auto_sync && !self.autosync_started {
+                self.start_autosync_polling();
+            }
+        }
+
+        let prev_start = self.start_with_windows;
+        ui.checkbox(&mut self.start_with_windows, "Start with Windows");
+        if self.start_with_windows != prev_start {
+            let _ = self.save_config();
+            if self.start_with_windows {
+                let _ = startup::enable_start_with_windows();
+            } else {
+                let _ = startup::disable_start_with_windows();
+            }
+        }
+
         if let Some(result) = &self.last_result {
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("Last Sync Result")
-                    .strong(),
-            );
+            ui.label(egui::RichText::new("Last Sync Result").strong());
             ui.label(format!("Imported: {}", result.imported));
             ui.label(format!("Skipped: {}", result.skipped));
             if !result.errors.is_empty() {
@@ -223,14 +369,12 @@ impl StsApp {
         ui.heading("Syncing...");
         ui.add_space(8.0);
 
-        // Check for progress updates
         if let Some(rx) = &self.progress_rx {
             while let Ok(progress) = rx.try_recv() {
                 self.current_progress = Some(progress);
             }
         }
 
-        // Check for completion
         let mut completed_result = None;
         if let Some(rx) = &self.result_rx {
             if let Ok(result) = rx.try_recv() {
@@ -239,10 +383,13 @@ impl StsApp {
         }
 
         if let Some(result) = completed_result {
+            self.sync_in_progress.store(false, Ordering::Relaxed);
+
             self.last_result = Some(result);
             self.progress_rx = None;
             self.result_rx = None;
             self.current_progress = None;
+            self.refresh_file_counts();
             self.state = AppState::Ready;
             return;
         }
@@ -261,27 +408,46 @@ impl StsApp {
             ui.spinner();
         }
 
-        // Keep repainting while syncing
         ctx.request_repaint();
     }
 }
 
 impl eframe::App for StsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.state.clone() {
-                AppState::Setup => self.render_setup(ui),
-                AppState::Ready => self.render_ready(ui),
-                AppState::Syncing => self.render_syncing(ctx, ui),
-            }
+        // Start auto-sync polling if ready and not yet started.
+        // The thread checks the auto_sync_enabled flag internally, so start it
+        // regardless of the current auto_sync setting — it will respect toggling.
+        if self.state != AppState::Setup && !self.autosync_started {
+            self.start_autosync_polling();
+        }
+
+        // Minimize on first frame if starting minimized
+        if !self.window_visible && !self.minimized_on_start {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.minimized_on_start = true;
+        }
+
+        // Keep the event loop alive even when minimized,
+        // so we can process tray events and auto-sync requests.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
+        self.handle_tray_events();
+        self.handle_close_requested(ctx);
+
+        egui::CentralPanel::default().show(ctx, |ui| match self.state.clone() {
+            AppState::Setup => self.render_setup(ui),
+            AppState::Ready => self.render_ready(ui),
+            AppState::Syncing => self.render_syncing(ctx, ui),
         });
     }
 }
 
 fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max_len {
         path.to_string()
     } else {
-        format!("...{}", &path[path.len() - max_len + 3..])
+        let suffix: String = chars[chars.len() - max_len + 3..].iter().collect();
+        format!("...{suffix}")
     }
 }
