@@ -2,6 +2,7 @@ use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::SystemTime;
 
 const BATCH_SIZE: usize = 10;
 
@@ -189,4 +190,66 @@ pub fn run_sync(
     });
 
     result
+}
+
+/// Derives the current_run.save path from the history folder path.
+/// history folder: .../saves/history → save file: .../saves/current_run.save
+pub fn current_run_save_path(history_folder: &str) -> Option<PathBuf> {
+    let history = PathBuf::from(history_folder);
+    let saves_dir = history.parent()?; // .../saves/
+    let save_path = saves_dir.join("current_run.save");
+    if save_path.exists() {
+        Some(save_path)
+    } else {
+        None
+    }
+}
+
+/// Returns the last modified time of the current_run.save file.
+pub fn current_run_modified_time(history_folder: &str) -> Option<SystemTime> {
+    let path = current_run_save_path(history_folder)?;
+    std::fs::metadata(&path).ok()?.modified().ok()
+}
+
+/// Uploads the current_run.save content to PUT /api/companion/active-run.
+/// Returns Ok(true) if uploaded, Ok(false) if file doesn't exist, Err on failure.
+pub fn sync_active_run(
+    api_url: &str,
+    api_token: &str,
+    history_folder: &str,
+) -> Result<bool, String> {
+    let path = match current_run_save_path(history_folder) {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read current_run.save: {e}"))?;
+
+    // Validate it's valid JSON with expected fields
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Invalid JSON in current_run.save: {e}"))?;
+
+    if json.get("players").is_none() || json.get("map_point_history").is_none() {
+        return Ok(false); // Not a valid save file (maybe empty/corrupt)
+    }
+
+    let url = format!("{}/api/companion/active-run", api_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .put(&url)
+        .header("Authorization", format!("Bearer {}", api_token))
+        .header("Content-Type", "application/json")
+        .body(content)
+        .send()
+        .map_err(|e| format!("Network error syncing active run: {e}"))?;
+
+    if response.status().is_success() {
+        Ok(true)
+    } else {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        Err(format!("Failed to sync active run ({status}): {body}"))
+    }
 }
