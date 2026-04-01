@@ -1,5 +1,5 @@
 use std::sync::mpsc;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, MenuId};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 pub struct TrayMenuIds {

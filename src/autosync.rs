@@ -23,38 +23,36 @@ pub fn start_polling(
     let auto_flag_for_runs = auto_sync_enabled.clone();
 
     // Run file sync thread (every 60s)
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(POLL_INTERVAL);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(POLL_INTERVAL);
 
-            if !auto_flag_for_runs.load(Ordering::Relaxed) {
-                continue;
+        if !auto_flag_for_runs.load(Ordering::Relaxed) {
+            continue;
+        }
+
+        if sync_flag_for_runs.load(Ordering::Relaxed) {
+            continue;
+        }
+
+        let synced = Config::load_synced_runs();
+        let new_count = detect::count_new_run_files(&folder_for_runs, &synced);
+
+        if new_count > 0 {
+            sync_flag_for_runs.store(true, Ordering::Relaxed);
+
+            let (progress_tx, _progress_rx) = std::sync::mpsc::channel();
+            let result = sync::run_sync(
+                API_URL.to_string(),
+                token_for_runs.clone(),
+                folder_for_runs.clone(),
+                progress_tx,
+            );
+
+            if result.imported > 0 {
+                notification::notify_sync_complete(result.imported);
             }
 
-            if sync_flag_for_runs.load(Ordering::Relaxed) {
-                continue;
-            }
-
-            let synced = Config::load_synced_runs();
-            let new_count = detect::count_new_run_files(&folder_for_runs, &synced);
-
-            if new_count > 0 {
-                sync_flag_for_runs.store(true, Ordering::Relaxed);
-
-                let (progress_tx, _progress_rx) = std::sync::mpsc::channel();
-                let result = sync::run_sync(
-                    API_URL.to_string(),
-                    token_for_runs.clone(),
-                    folder_for_runs.clone(),
-                    progress_tx,
-                );
-
-                if result.imported > 0 {
-                    notification::notify_sync_complete(result.imported);
-                }
-
-                sync_flag_for_runs.store(false, Ordering::Relaxed);
-            }
+            sync_flag_for_runs.store(false, Ordering::Relaxed);
         }
     });
 
@@ -67,7 +65,9 @@ pub fn start_polling(
         // Check if save file path resolves
         match sync::current_run_save_path(&folder_path) {
             Some(p) => eprintln!("[active-run] Save file found at: {}", p.display()),
-            None => eprintln!("[active-run] WARNING: No current_run.save found relative to {folder_path}"),
+            None => eprintln!(
+                "[active-run] WARNING: No current_run.save found relative to {folder_path}"
+            ),
         }
 
         loop {

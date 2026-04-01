@@ -27,12 +27,13 @@ fn main() -> eframe::Result {
 
     // Create tray icon before the event loop (required by tray-icon on Windows).
     // tray_handle must stay alive (not dropped) for the icon to remain visible.
-    let tray_handle = tray::create_tray()
-        .expect("Failed to create tray icon");
+    let tray_handle = tray::create_tray().expect("Failed to create tray icon");
 
     // Load the icon for the window titlebar and taskbar
     let icon_bytes = include_bytes!("../assets/icon.png");
-    let icon_img = image::load_from_memory(icon_bytes).expect("Failed to load icon").into_rgba8();
+    let icon_img = image::load_from_memory(icon_bytes)
+        .expect("Failed to load icon")
+        .into_rgba8();
     let (w, h) = icon_img.dimensions();
     let window_icon = egui::IconData {
         rgba: icon_img.into_raw(),

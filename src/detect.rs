@@ -13,11 +13,7 @@ pub fn detect_save_folders() -> Vec<PathBuf> {
             if base.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(&base) {
                     for entry in entries.flatten() {
-                        let history = entry
-                            .path()
-                            .join("profile1")
-                            .join("saves")
-                            .join("history");
+                        let history = entry.path().join("profile1").join("saves").join("history");
                         if history.is_dir() {
                             results.push(history);
                         }
@@ -39,11 +35,8 @@ pub fn detect_save_folders() -> Vec<PathBuf> {
                 if base.is_dir() {
                     if let Ok(entries) = std::fs::read_dir(&base) {
                         for entry in entries.flatten() {
-                            let history = entry
-                                .path()
-                                .join("profile1")
-                                .join("saves")
-                                .join("history");
+                            let history =
+                                entry.path().join("profile1").join("saves").join("history");
                             if history.is_dir() {
                                 results.push(history);
                             }
@@ -70,7 +63,12 @@ pub fn count_new_run_files(folder: &str, synced: &HashSet<String>) -> usize {
                 .filter(|e| {
                     let p = e.path();
                     p.extension().is_some_and(|ext| ext == "run")
-                        && !synced.contains(&p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                        && !synced.contains(
+                            &p.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        )
                 })
                 .count()
         })
@@ -87,11 +85,7 @@ pub fn count_run_files(folder: &str) -> usize {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "run")
-                })
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "run"))
                 .count()
         })
         .unwrap_or(0)

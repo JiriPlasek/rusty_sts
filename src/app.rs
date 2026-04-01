@@ -48,11 +48,7 @@ pub struct StsApp {
 }
 
 impl StsApp {
-    pub fn new(
-        tray_handle: TrayHandle,
-        start_visible: bool,
-        egui_ctx: egui::Context,
-    ) -> Self {
+    pub fn new(tray_handle: TrayHandle, start_visible: bool, egui_ctx: egui::Context) -> Self {
         let _tray_icon = tray_handle._icon;
         let tray_menu_ids = tray_handle.ids;
         let tray_menu_rx = tray_handle.menu_rx;

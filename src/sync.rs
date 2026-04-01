@@ -67,7 +67,11 @@ pub fn run_sync(
     let run_files: Vec<PathBuf> = all_run_files
         .into_iter()
         .filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             !synced.contains(&name)
         })
         .collect();
@@ -121,7 +125,9 @@ pub fn run_sync(
             continue;
         }
 
-        let body = SyncRequest { files: request_files };
+        let body = SyncRequest {
+            files: request_files,
+        };
 
         match client
             .post(&sync_url)
@@ -135,7 +141,12 @@ pub fn run_sync(
                     // Track filenames from this batch as synced
                     let batch_filenames: Vec<String> = batch
                         .iter()
-                        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                        .map(|p| {
+                            p.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        })
                         .collect();
                     match response.json::<SyncResponse>() {
                         Ok(resp) => {
@@ -145,9 +156,7 @@ pub fn run_sync(
                             newly_synced.extend(batch_filenames);
                         }
                         Err(e) => {
-                            result
-                                .errors
-                                .push(format!("Failed to parse response: {e}"));
+                            result.errors.push(format!("Failed to parse response: {e}"));
                         }
                     }
                 } else if status.as_u16() == 401 {

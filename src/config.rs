@@ -85,7 +85,8 @@ impl Config {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create config directory: {e}"))?;
         }
-        let json = serde_json::to_string(synced).map_err(|e| format!("Failed to serialize: {e}"))?;
+        let json =
+            serde_json::to_string(synced).map_err(|e| format!("Failed to serialize: {e}"))?;
         fs::write(&path, json).map_err(|e| format!("Failed to write synced runs: {e}"))?;
         Ok(())
     }

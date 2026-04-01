@@ -5,8 +5,7 @@ const APP_NAME: &str = "rusty-sts";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 pub fn enable_start_with_windows() -> Result<(), String> {
-    let exe_path =
-        std::env::current_exe().map_err(|e| format!("Failed to get exe path: {e}"))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("Failed to get exe path: {e}"))?;
     let value = format!("\"{}\" --minimized", exe_path.display());
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
